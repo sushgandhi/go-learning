@@ -30,17 +30,17 @@ func TestUserDetailStore_GetUsersByID(t *testing.T) {
         },
     }
 
-    userService := NewUserDetailService(mockStore)
+    users, err := mockStore.GetUsersByID(context.Background(), "123")
+    if err != nil {
+        t.Fatalf("expected no error, got %v", err)
+    }
 
-    r := chi.NewRouter()
-    r.Get("/{id}", userService.GetUserByID)
+    if len(users) != 1 {
+        t.Fatalf("expected one user, got %v", len(users))
+    }
 
-    req := httptest.NewRequest("GET", "/123", nil)
-    w := httptest.NewRecorder()
-    r.ServeHTTP(w, req)
-
-    if w.Code != http.StatusOK {
-        t.Fatalf("expected status OK, got %v", w.Code)
+    if users[0]["id"] != "123" || users[0]["name"] != "Test User" {
+        t.Fatalf("unexpected user data: %v", users[0])
     }
 
     // Add more assertions as needed

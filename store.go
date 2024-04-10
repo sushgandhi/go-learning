@@ -1,86 +1,77 @@
-// middleware/store.go
-
-package middleware
-
-import (
-	"github.com/gin-gonic/gin"
-	"github.com/yourusername/yourproject/store"
-	"go.mongodb.org/mongo-driver/mongo"
-)
-
-func WithUserStore(collection *mongo.Collection) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		userStore := &store.MongoUserStore{collection: collection}
-		c.Set("userStore", userStore)
-		c.Next()
-	}
-}
-
-------------------
-// store/userstore.go
+// pkg/store/mongodb_test.go
 
 package store
 
 import (
     "context"
-
-    "go.mongodb.org/mongo-driver/bson"
     "go.mongodb.org/mongo-driver/mongo"
 )
 
-type UserStore interface {
-    GetUserDetailsByID(ctx context.Context, userID string) (bson.M, error)
-    AddUser(ctx context.Context, userDetail bson.M) (interface{}, error)
+type MockCollection struct {
+    FindOneFunc func(ctx context.Context, filter interface{}) *mongo.SingleResult
+    // Add other methods as needed
 }
 
-type MongoUserStore struct {
-    collection *mongo.Collection
+func (m *MockCollection) FindOne(ctx context.Context, filter interface{}) *mongo.SingleResult {
+    return m.FindOneFunc(ctx, filter)
 }
 
-func (m *MongoUserStore) GetUserDetailsByID(ctx context.Context, userID string) (bson.M, error) {
-    filter := bson.D{{"userid", userID}}
-    var userDetail bson.M
-    err := m.collection.FindOne(ctx, filter).Decode(&userDetail)
-    return userDetail, err
-}
-
-func (m *MongoUserStore) AddUser(ctx context.Context, userDetail bson.M) (interface{}, error) {
-    result, err := m.collection.InsertOne(ctx, userDetail)
-    return result, err
-}
+// Implement other methods as needed
 
 
-// services/userdetails.go
+// pkg/store/mongodb_test.go
 
-package services
+package store
 
 import (
     "context"
-    "time"
-
-    "github.com/gin-gonic/gin"
-    "github.com/yourusername/yourproject/store"
 )
 
-func GetUserDetailsByIDHandler(s store.UserStore) gin.HandlerFunc {
-    // ...
+type MockSingleResult struct {
+    DecodeFunc func(val interface{}) error
 }
 
-func AddUserHandler(s store.UserStore) gin.HandlerFunc {
-    // ...
+func (m *MockSingleResult) Decode(val interface{}) error {
+    return m.DecodeFunc(val)
 }
 
 
-// main.go
+// pkg/store/mongodb_test.go
 
-func main() {
-    // ...
+package store
 
-    userCollection := client.Database("yourdatabase").Collection("userdetail")
-    userStore := &store.MongoUserStore{collection: userCollection}
+import (
+    "context"
+    "go.mongodb.org/mongo-driver/bson"
+)
 
-    router.GET("/userdetails/:id", services.GetUserDetailsByIDHandler(userStore))
-    router.POST("/userdetails", services.AddUserHandler(userStore))
-
-    // ...
+type MockMongoStore struct {
+    FindOneFunc func(ctx context.Context, filter interface{}) SingleResult
+    // Add other methods as needed
 }
+
+func (m *MockMongoStore) FindOne(ctx context.Context, filter interface{}) SingleResult {
+    return m.FindOneFunc(ctx, filter)
+}
+
+// Implement other methods as needed
+
+// pkg/store/userdetailstore_test.go
+
+package store
+
+import (
+    "context"
+)
+
+type MockUserDetailStore struct {
+    GetUsersByIDFunc func(ctx context.Context, id string) error
+    // Add other methods as needed
+}
+
+func (m *MockUserDetailStore) GetUsersByID(ctx context.Context, id string) error {
+    return m.GetUsersByIDFunc(ctx, id)
+}
+
+// Implement other methods as needed
+

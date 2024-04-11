@@ -1,92 +1,50 @@
-// pkg/services/userdetail_test.go
+// pkg/store/userdetails_test.go
 
-package services
+package store
 
 import (
     "context"
     "net/http"
     "net/http/httptest"
     "testing"
-    "github.com/go-chi/chi"
-    "github.com/yourusername/yourproject/pkg/store"
+
+    "github.com/gorilla/mux"
+    "github.com/stretchr/testify/assert"
     "go.mongodb.org/mongo-driver/bson"
 )
 
-func TestUserDetailService_GetUserByID(t *testing.T) {
-    mockStore := &store.MockUserDetailStore{
-        GetUsersByIDFunc: func(ctx context.Context, id string) ([]bson.M, error) {
-            return []bson.M{{"id": "123", "name": "Test User"}}, nil
+type MockUserStore struct {
+    GetUserDetailsByIDFunc func(ctx context.Context, id string) (bson.M, error)
+}
+
+func (m *MockUserStore) GetUserDetailsByID(ctx context.Context, id string) (bson.M, error) {
+    return m.GetUserDetailsByIDFunc(ctx, id)
+}
+
+func TestGetUserDetailsByID(t *testing.T) {
+    mockUserStore := &MockUserStore{
+        GetUserDetailsByIDFunc: func(ctx context.Context, id string) (bson.M, error) {
+            return bson.M{"id": "123", "name": "Test User"}, nil
         },
     }
 
-    userService := NewUserDetailService(mockStore)
+    r := mux.NewRouter()
+    r.HandleFunc("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
+        vars := mux.Vars(r)
+        id := vars["id"]
+        user, err := mockUserStore.GetUserDetailsByID(r.Context(), id)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(user)
+    }).Methods("GET")
 
-    r := chi.NewRouter()
-    r.Get("/{id}", userService.GetUserByID)
-
-    req := httptest.NewRequest("GET", "/123", nil)
+    req := httptest.NewRequest("GET", "/users/123", nil)
     w := httptest.NewRecorder()
     r.ServeHTTP(w, req)
 
-    if w.Code != http.StatusOK {
-        t.Fatalf("expected status OK, got %v", w.Code)
-    }
-
-    // Add more assertions as needed
+    assert.Equal(t, http.StatusOK, w.Code)
+    assert.Contains(t, w.Body.String(), "Test User")
 }
-
-// Add tests for GetUser and AddUser
-
-
-// pkg/store/userdetailstore_test.go
-
-package store
-
-import (
-    "context"
-    "testing"
-    "go.mongodb.org/mongo-driver/bson"
-)
-
-func TestUserDetailStore_GetUsersByID(t *testing.T) {
-    mockMongoStore := &MockMongoStore{
-        FindFunc: func(ctx context.Context, filter bson.M) ([]bson.M, error) {
-            return []bson.M{{"id": "123", "name": "Test User"}}, nil
-        },
-    }
-
-    userDetailStore := NewUserDetailStore(mockMongoStore)
-
-    users, err := userDetailStore.GetUsersByID(context.Background(), "123")
-    if err != nil {
-        t.Fatalf("expected nil error, got %v", err)
-    }
-
-    expectedUsers := []bson.M{{"id": "123", "name": "Test User"}}
-    if !reflect.DeepEqual(users, expectedUsers) {
-        t.Fatalf("expected %v, got %v", expectedUsers, users)
-    }
-}
-
-// Add tests for other methods
-
-// pkg/store/mongostore_test.go
-
-package store
-
-import (
-    "context"
-    "go.mongodb.org/mongo-driver/bson"
-    "go.mongodb.org/mongo-driver/mongo"
-)
-
-type MockMongoStore struct {
-    FindFunc func(ctx context.Context, filter bson.M) ([]bson.M, error)
-    // Add other methods as needed
-}
-
-func (m *MockMongoStore) Find(ctx context.Context, filter bson.M) ([]bson.M, error) {
-    return m.FindFunc(ctx, filter)
-}
-
-// Implement other methods as needed

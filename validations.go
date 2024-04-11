@@ -48,3 +48,32 @@ func TestGetUserDetailsByID(t *testing.T) {
     assert.Equal(t, http.StatusOK, w.Code)
     assert.Contains(t, w.Body.String(), "Test User")
 }
+
+//
+
+func TestGetUserDetailsByID(t *testing.T) {
+    mockUserStore := &MockUserStore{
+        GetUserDetailsByIDFunc: func(ctx context.Context, id string) (bson.M, error) {
+            return bson.M{"id": "123", "name": "Test User"}, nil
+        },
+    }
+
+    r := chi.NewRouter()
+    r.Get("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
+        id := chi.URLParam(r, "id")
+        user, err := mockUserStore.GetUserDetailsByID(r.Context(), id)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(user)
+    })
+
+    req := httptest.NewRequest("GET", "/users/123", nil)
+    w := httptest.NewRecorder()
+    r.ServeHTTP(w, req)
+
+    assert.Equal(t, http.StatusOK, w.Code)
+    assert.Contains(t, w.Body.String(), "Test User")
+}

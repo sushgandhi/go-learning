@@ -1,3 +1,35 @@
+// Assuming this is your interface
+type UserDetailsStore interface {
+    FindUserByID(ctx context.Context, id string) (store.User, error)
+    // Other methods...
+}
+
+// Your MockUserDetails should implement UserDetailsStore
+type MockUserDetails struct {
+    FindUserByIDFunc func(ctx context.Context, id string) (store.User, error)
+    // Other function fields...
+}
+
+func (m *MockUserDetails) FindUserByID(ctx context.Context, id string) (store.User, error) {
+    return m.FindUserByIDFunc(ctx, id)
+}
+
+// Other methods...
+
+// Now you can use MockUserDetails in place of mongodbstore in your tests
+func TestGetUserByID(t *testing.T) {
+    mockUserDetails := &MockUserDetails{
+        FindUserByIDFunc: func(ctx context.Context, id string) (store.User, error) {
+            return store.User{ID: "123", Name: "Test User"}, nil
+        },
+    }
+
+    // GetUserByID should accept a UserDetailsStore, so you can pass in mockUserDetails
+    r := chi.NewRouter()
+    r.Get("/{userID}", GetUserByID(mockUserDetails))
+
+    // ...
+}
 // pkg/store/mongodb_test.go
 
 package store

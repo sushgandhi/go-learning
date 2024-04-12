@@ -35,3 +35,24 @@ func TestUpdateUserDetails(t *testing.T) {
     assert.Equal(t, http.StatusOK, w.Code)
     assert.Contains(t, w.Body.String(), "1")
 }
+
+
+func TestAddUserDetails(t *testing.T) {
+    mockUserStore := &MockUserStore{
+        AddUserDetailsFunc: func(ctx context.Context, user map[string]interface{}) (interface{}, error) {
+            count, err := mockUserStore.UserCountFunc(ctx)
+            if err != nil {
+                return nil, err
+            }
+            if count >= 10 {
+                return nil, errors.New("User limit reached")
+            }
+            return map[string]string{"insertedid": "sdfdsaf"}, nil
+        },
+        UserCountFunc: func(ctx context.Context) (int64, error) {
+            return 1, nil
+        },
+    }
+
+    // ... rest of the test
+}

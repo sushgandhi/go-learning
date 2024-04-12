@@ -35,3 +35,43 @@ func TestAddUserDetails(t *testing.T) {
 
     assert.Equal(t, http.StatusOK, w.Code)
 }
+
+
+type MockMongoUserStore struct {
+    CountUsersFunc func(ctx context.Context) (int64, error)
+    GetUsersFunc   func(ctx context.Context) ([]bson.M, error)
+}
+
+func (m *MockMongoUserStore) CountUsers(ctx context.Context) (int64, error) {
+    return m.CountUsersFunc(ctx)
+}
+
+func (m *MockMongoUserStore) GetUsers(ctx context.Context) ([]bson.M, error) {
+    return m.GetUsersFunc(ctx)
+}
+
+func TestGetUsers(t *testing.T) {
+    mockStore := &MockMongoUserStore{
+        CountUsersFunc: func(ctx context.Context) (int64, error) {
+            return 1, nil
+        },
+        GetUsersFunc: func(ctx context.Context) ([]bson.M, error) {
+            users := []bson.M{
+                {"id": "123", "name": "Test User"},
+            }
+            return users, nil
+        },
+    }
+
+    userService := NewUserService(mockStore)
+    req := httptest.NewRequest("GET", "/users", nil)
+    w := httptest.NewRecorder()
+
+    _, err := userService.GetUsers(w, req)
+    if err != nil {
+        t.Fatalf("expected no error, got %v", err)
+    }
+
+    assert.Equal(t, http.StatusOK, w.Code)
+    assert.Contains(t, w.Body.String(), "Test User")
+}

@@ -18,15 +18,19 @@ export default userManager;
 // src/App.tsx
 
 import React, { useEffect, useState } from 'react';
-import { BrowserRouter as Router, Route, Redirect } from 'react-router-dom';
+import { BrowserRouter as Router, Route, Redirect, RouteProps } from 'react-router-dom';
 import userManager from './authService';
 import Home from './components/Home/Home';
 import UserDetails from './components/UserDetails/UserDetails';
 import AddUser from './components/AddUser/AddUser';
 import Callback from './components/Callback/Callback';
 
-const PrivateRoute = ({ component: Component, ...rest }) => {
-  const [user, setUser] = useState(null);
+interface PrivateRouteProps extends RouteProps {
+  component: any;
+}
+
+const PrivateRoute: React.FC<PrivateRouteProps> = ({ component: Component, ...rest }) => {
+  const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
     userManager.getUser().then(setUser);
@@ -46,7 +50,7 @@ const PrivateRoute = ({ component: Component, ...rest }) => {
   );
 };
 
-const App = () => {
+const App: React.FC = () => {
   useEffect(() => {
     userManager.getUser().then(user => {
       if (!user) {
@@ -73,7 +77,7 @@ import React, { useEffect } from 'react';
 import { useHistory } from 'react-router-dom';
 import userManager from '../../authService';
 
-const Callback = () => {
+const Callback: React.FC = () => {
   const history = useHistory();
 
   useEffect(() => {
@@ -91,5 +95,4 @@ const Callback = () => {
 };
 
 export default Callback;
-
 

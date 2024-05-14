@@ -1,0 +1,59 @@
+import React, { useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+import userManager from '../authService';
+
+function withAuthentication(WrappedComponent) {
+  return function(props) {
+    const navigate = useNavigate();
+
+    useEffect(() => {
+      userManager.getUser().then(user => {
+        if (!user) {
+          navigate('/callback');
+        }
+      });
+    }, [navigate]);
+
+    return <WrappedComponent {...props} />;
+  };
+}
+
+export default withAuthentication;
+
+####
+
+
+import React from 'react';
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import userManager from './authService';
+import Home from './components/Home/Home';
+import Callback from './components/Callback/Callback';
+import HomeMenu from './components/HomeMenu/HomeMenu';
+import withAuthentication from './withAuthentication';
+
+const AuthenticatedHome = withAuthentication(Home);
+const AuthenticatedHomeMenu = withAuthentication(HomeMenu);
+
+function App() {
+  useEffect(() => {
+    userManager.getUser().then(user => {
+      if (!user) {
+        userManager.signinRedirect();
+      }
+    });
+  }, []);
+
+  return (
+    <Router>
+      <div className="app">
+        <Routes>
+          <Route path="/" element={<AuthenticatedHome />} />
+          <Route path="*" element={<AuthenticatedHomeMenu />} />
+          <Route path="/callback" element={<Callback />} />
+        </Routes>
+      </div>
+    </Router>
+  );
+}
+
+export default App;

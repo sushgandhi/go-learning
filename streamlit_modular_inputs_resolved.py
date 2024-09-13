@@ -2,6 +2,7 @@
 import streamlit as st
 import time
 
+st.markdown("<h1 style='text-align: center; color: red;'>Some title</h1>", unsafe_allow_html=True)
 
 def get_value_for(default_val, other_info=dict()):
     label = other_info["label"] if "label" in other_info.keys() else " "

@@ -1,0 +1,99 @@
+import requests
+import os
+import time
+
+# Configuration (Replace with your values)
+SHAREPOINT_SITE_ID = "YOUR_SITE_ID"
+DRIVE_ID = "YOUR_DRIVE_ID"  # Drive ID of the app's dedicated folder
+FOLDER_PATH = "/AppFolder" #Path inside the drive, that will be the working directory.
+CLIENT_ID = "YOUR_CLIENT_ID"
+CLIENT_SECRET = "YOUR_CLIENT_SECRET"
+TENANT_ID = "YOUR_TENANT_ID"
+GEMINI_API_ENDPOINT = "YOUR_GEMINI_API_ENDPOINT"
+GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
+
+def get_access_token():
+    """Gets an access token from Azure AD."""
+    token_url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+    token_data = {
+        "grant_type": "client_credentials",
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "scope": "https://graph.microsoft.com/.default",
+    }
+    response = requests.post(token_url, data=token_data)
+    response.raise_for_status()
+    return response.json()["access_token"]
+
+def get_file_content(access_token, file_id):
+    """Gets the content of a file from OneDrive/SharePoint."""
+    file_content_url = f"https://graph.microsoft.com/v1.0/sites/{SHAREPOINT_SITE_ID}/drives/{DRIVE_ID}/items/{file_id}/content"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    response = requests.get(file_content_url, headers=headers)
+    response.raise_for_status()
+    return response.content #returns binary data
+
+def upload_file(access_token, file_path, file_name):
+    """Uploads a file to the specified folder."""
+    upload_url = f"https://graph.microsoft.com/v1.0/sites/{SHAREPOINT_SITE_ID}/drives/{DRIVE_ID}:/{FOLDER_PATH}/{file_name}:/content"
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/octet-stream"}
+    with open(file_path, "rb") as f:
+        file_content = f.read()
+    response = requests.put(upload_url, headers=headers, data=file_content)
+    response.raise_for_status()
+    print(f"File '{file_name}' uploaded successfully.")
+
+def list_files(access_token):
+    """Lists files in the specified folder."""
+    list_url = f"https://graph.microsoft.com/v1.0/sites/{SHAREPOINT_SITE_ID}/drives/{DRIVE_ID}:/{FOLDER_PATH}:/children"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    response = requests.get(list_url, headers=headers)
+    response.raise_for_status()
+    return response.json()["value"]
+
+def call_gemini_api(file_content):
+    """Calls the Gemini API to process the file content."""
+    headers = {
+        "Content-Type": "application/json",
+        "x-goog-api-key": GEMINI_API_KEY
+    }
+    #convert binary to base64 if needed.
+    data = {
+        "contents": [{"parts": [{"text": file_content.decode('utf-8','ignore')}]}]
+    }
+    response = requests.post(GEMINI_API_ENDPOINT, headers=headers, json=data)
+    response.raise_for_status()
+    return response.json()
+
+def process_new_files(access_token):
+    """Polls the folder for new files and processes them."""
+    processed_files = set()  # Track processed files
+
+    while True:
+        files = list_files(access_token)
+        for file in files:
+            file_id = file["id"]
+            file_name = file["name"]
+            if file_id not in processed_files and file["file"]: # only process files, not folders.
+                print(f"New file detected: {file_name}")
+                file_content = get_file_content(access_token, file_id)
+                try:
+                    gemini_response = call_gemini_api(file_content)
+                    summary = gemini_response["candidates"][0]["content"]["parts"][0]["text"]
+                    # Example: Write the summary to a new file
+                    summary_file_name = f"{file_name}.summary.txt"
+                    with open(summary_file_name, "w") as f:
+                        f.write(summary)
+                    upload_file(access_token, summary_file_name, summary_file_name)
+                    os.remove(summary_file_name) #remove local file.
+                    processed_files.add(file_id)
+                except Exception as e:
+                    print(f"Error processing {file_name}: {e}")
+        time.sleep(10)  # Poll every 10 seconds
+
+def main():
+    access_token = get_access_token()
+    process_new_files(access_token)
+
+if __name__ == "__main__":
+    main()

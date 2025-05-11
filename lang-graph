@@ -1,0 +1,470 @@
+# Required libraries:
+# pip install langgraph langchain-core pandas openpyxl (for actual Excel reading)
+
+from typing import TypedDict, Dict, Any, List, Optional
+from langgraph.graph import StateGraph, END
+import pandas as pd # For creating a dummy DataFrame and potentially reading Excel
+
+# --- 1. Define the State ---
+class ExcelRowClassificationState(TypedDict):
+    """
+    Represents the state of the Excel row classification workflow.
+    """
+    # Inputs for the entire batch/Excel file (passed with each row, but typically constant for a batch)
+    all_rows_data: Optional[List[Dict[str, Any]]] # Optional: All rows for broader context if needed
+    provided_examples: Optional[List[Dict[str, Any]]] # e.g., [{'text_column': 'example1', 'label_column': 'CategoryA'}]
+    class_definitions: Optional[Dict[str, str]] # e.g., {'CategoryA': 'Definition of A', 'CategoryB': 'Definition of B'}
+    target_column_for_classification: str         # Column name in input_row containing text to classify
+    label_column_name: Optional[str]              # Column name for labels if provided_examples are used
+
+    # Per-row data
+    input_row: Dict[str, Any]
+
+    # Workflow control and results
+    classification_mode: Optional[str] # "unsupervised_anomaly", "few_shot_examples", "definition_based"
+    llm_prompt: Optional[str]          # The prompt sent to the LLM
+    classification_category: Optional[str]
+    confidence_score: Optional[float]
+    llm_reasoning: Optional[str]       # Explanation from the LLM
+    error_message: Optional[str]
+    processing_steps: List[str]
+
+# --- 2. Define Agent/Nodes ---
+
+def determine_classification_strategy(state: ExcelRowClassificationState) -> ExcelRowClassificationState:
+    """
+    Determines the classification strategy based on provided examples or definitions.
+    """
+    print("---DETERMINING CLASSIFICATION STRATEGY---")
+    current_steps = state.get("processing_steps", [])
+    examples = state.get("provided_examples")
+    definitions = state.get("class_definitions")
+    target_col = state.get("target_column_for_classification")
+    label_col = state.get("label_column_name")
+
+    if not target_col:
+        state["error_message"] = "Critical: `target_column_for_classification` is not set in the initial state."
+        state["processing_steps"] = current_steps + ["determine_classification_strategy: FAILED - No target column"]
+        return state
+
+    if examples and label_col:
+        # Validate examples
+        valid_examples = True
+        if not isinstance(examples, list) or not all(isinstance(ex, dict) for ex in examples):
+            valid_examples = False
+        else:
+            for ex in examples:
+                if target_col not in ex or label_col not in ex:
+                    valid_examples = False
+                    break
+        if valid_examples:
+            state["classification_mode"] = "few_shot_examples"
+            print("Strategy: Few-shot with examples.")
+            state["processing_steps"] = current_steps + ["determine_classification_strategy: SUCCESS - Few-shot"]
+            return state
+        else:
+            print("Warning: `provided_examples` are present but invalid or `label_column_name` is missing/incorrect. Falling back.")
+            # Fallback logic if examples are malformed
+            current_steps.append("determine_classification_strategy: WARNING - Invalid examples")
+
+
+    if definitions and isinstance(definitions, dict) and definitions:
+        state["classification_mode"] = "definition_based"
+        print("Strategy: Definition-based.")
+        state["processing_steps"] = current_steps + ["determine_classification_strategy: SUCCESS - Definition-based"]
+        return state
+    
+    state["classification_mode"] = "unsupervised_anomaly"
+    print("Strategy: Unsupervised / Anomaly Detection (no valid examples or definitions found).")
+    state["processing_steps"] = current_steps + ["determine_classification_strategy: SUCCESS - Unsupervised"]
+    return state
+
+def validate_row_data(state: ExcelRowClassificationState) -> ExcelRowClassificationState:
+    """
+    Validates the current input_row.
+    """
+    print("---VALIDATING ROW DATA---")
+    current_steps = state.get("processing_steps", [])
+    if state.get("error_message"): # Skip if critical error from strategy determination
+        state["processing_steps"] = current_steps + ["validate_row_data: SKIPPED due to prior error"]
+        return state
+
+    input_row = state.get("input_row")
+    target_col = state.get("target_column_for_classification")
+
+    if not input_row:
+        state["error_message"] = "Input row is missing."
+        state["processing_steps"] = current_steps + ["validate_row_data: FAILED - No input row"]
+        return state
+
+    if target_col not in input_row or not isinstance(input_row.get(target_col), str):
+        state["error_message"] = f"Missing or invalid '{target_col}' field in the input row. It must be a string."
+        state["processing_steps"] = current_steps + [f"validate_row_data: FAILED - Missing/invalid {target_col}"]
+        return state
+
+    print(f"Row data validated: {input_row}")
+    state["processing_steps"] = current_steps + ["validate_row_data: SUCCESS"]
+    return state
+
+def prepare_llm_input_node(state: ExcelRowClassificationState) -> ExcelRowClassificationState:
+    """
+    Prepares the prompt for the LLM based on the classification mode.
+    """
+    print("---PREPARING LLM INPUT---")
+    current_steps = state.get("processing_steps", [])
+    if state.get("error_message"):
+        state["processing_steps"] = current_steps + ["prepare_llm_input_node: SKIPPED due to error"]
+        return state
+
+    mode = state["classification_mode"]
+    row_data = state["input_row"]
+    target_col = state["target_column_for_classification"]
+    text_to_classify = row_data.get(target_col, "")
+
+    prompt = ""
+    if mode == "unsupervised_anomaly":
+        prompt = (
+            f"Analyze the following text data from a dataset: '{text_to_classify}'.\n"
+            "Identify its key characteristics. Based on these, would you consider this data point "
+            "an anomaly, or can you suggest a general category it might belong to? "
+            "Provide a category and a brief reasoning. If anomalous, state 'Anomaly' and explain why."
+            "\n\nCategory: \nReasoning:"
+        )
+    elif mode == "few_shot_examples":
+        examples = state["provided_examples"]
+        label_col = state["label_column_name"]
+        formatted_examples = "\n".join(
+            [f"- Text: \"{ex[target_col]}\" -> Category: {ex[label_col]}" for ex in examples]
+        )
+        prompt = (
+            "You are an expert text classifier. Given the following examples:\n"
+            f"{formatted_examples}\n\n"
+            f"Now, classify the following text: '{text_to_classify}'\n"
+            "Provide only the category name. If unsure, state 'Uncertain'.\n\n"
+            "Category:"
+        )
+    elif mode == "definition_based":
+        definitions = state["class_definitions"]
+        formatted_definitions = "\n".join(
+            [f"- {cat}: {desc}" for cat, desc in definitions.items()]
+        )
+        prompt = (
+            "You are an expert text classifier. Use the following category definitions to classify the text below:\n\n"
+            "Definitions:\n"
+            f"{formatted_definitions}\n\n"
+            f"Text to classify: '{text_to_classify}'\n"
+            "Provide the most fitting category name from the definitions. If none fit well, state 'Uncategorized'.\n\n"
+            "Category:"
+        )
+    else:
+        state["error_message"] = f"Unknown classification mode: {mode}"
+        state["processing_steps"] = current_steps + [f"prepare_llm_input_node: FAILED - Unknown mode {mode}"]
+        return state
+
+    state["llm_prompt"] = prompt
+    print(f"LLM Prompt for mode '{mode}':\n{prompt[:200]}...") # Print snippet of prompt
+    state["processing_steps"] = current_steps + [f"prepare_llm_input_node: SUCCESS - Mode {mode}"]
+    return state
+
+def llm_classification_agent(state: ExcelRowClassificationState) -> ExcelRowClassificationState:
+    """
+    Node representing the LLM classification agent.
+    This is a PLACEHOLDER for actual LLM calls.
+    """
+    print("---LLM CLASSIFICATION AGENT---")
+    current_steps = state.get("processing_steps", [])
+    if state.get("error_message") or not state.get("llm_prompt"):
+        print("Skipping LLM classification due to previous error or missing prompt.")
+        state["processing_steps"] = current_steps + ["llm_classification_agent: SKIPPED"]
+        return state
+
+    prompt = state["llm_prompt"]
+    mode = state["classification_mode"]
+    text_to_classify = state["input_row"].get(state["target_column_for_classification"], "")
+
+    # **** BEGIN LLM CALL SIMULATION ****
+    # In a real application, you would make an API call to your LLM here
+    # using the `prompt`.
+    print(f"Simulating LLM call for: '{text_to_classify[:50]}...'")
+    simulated_category = "Simulated Category"
+    simulated_confidence = 0.75
+    simulated_reasoning = "This is a simulated LLM response."
+
+    if mode == "unsupervised_anomaly":
+        if "critical" in text_to_classify.lower() or "error" in text_to_classify.lower():
+            simulated_category = "Anomaly"
+            simulated_reasoning = "Text contains keywords suggesting an anomaly."
+            simulated_confidence = 0.9
+        elif not text_to_classify.strip():
+            simulated_category = "Empty/Invalid"
+            simulated_reasoning = "Text is empty."
+            simulated_confidence = 0.5
+        else:
+            simulated_category = "General Observation"
+            simulated_reasoning = "Text appears to be a general statement."
+            simulated_confidence = 0.6
+    elif mode == "few_shot_examples":
+        # Simple logic based on keywords from typical examples
+        if "urgent" in text_to_classify.lower() or "asap" in text_to_classify.lower():
+            simulated_category = "Urgent"
+            simulated_confidence = 0.92
+        elif "question" in text_to_classify.lower():
+            simulated_category = "Inquiry"
+            simulated_confidence = 0.85
+        else:
+            simulated_category = "General" # Fallback for few-shot
+            simulated_confidence = 0.65
+    elif mode == "definition_based":
+        # Simple logic based on keywords and simulated definitions
+        if "financial loss" in text_to_classify.lower() and "High Risk" in state.get("class_definitions", {}):
+            simulated_category = "High Risk"
+            simulated_confidence = 0.88
+        elif "customer satisfaction" in text_to_classify.lower() and "Feedback" in state.get("class_definitions", {}):
+            simulated_category = "Feedback"
+            simulated_confidence = 0.82
+        else:
+            simulated_category = "Uncategorized"
+            simulated_confidence = 0.55
+    
+    # **** END LLM CALL SIMULATION ****
+
+    print(f"LLM_Simulated_Response: Category='{simulated_category}', Confidence={simulated_confidence}, Reasoning='{simulated_reasoning}'")
+    state["classification_category"] = simulated_category
+    state["confidence_score"] = simulated_confidence
+    state["llm_reasoning"] = simulated_reasoning
+    state["processing_steps"] = current_steps + [f"llm_classification_agent: SUCCESS - {simulated_category}"]
+    return state
+
+def quality_check_node(state: ExcelRowClassificationState) -> ExcelRowClassificationState:
+    """
+    Node to perform a quality check on the classification.
+    """
+    print("---QUALITY CHECK---")
+    current_steps = state.get("processing_steps", [])
+    if state.get("error_message"):
+        state["processing_steps"] = current_steps + ["quality_check_node: SKIPPED"]
+        return state
+
+    confidence = state.get("confidence_score", 0.0)
+    category = state.get("classification_category", "")
+
+    if category == "Uncertain" or category == "Uncategorized" or category == "Empty/Invalid":
+        print(f"Category '{category}' indicates uncertainty or invalid data. Flagging for review.")
+        state["classification_category"] = f"Review_Needed: {category}"
+        state["processing_steps"] = current_steps + [f"quality_check_node: FLAGGED FOR REVIEW - {category}"]
+    elif confidence is not None and confidence < 0.7: # Threshold for review
+        print(f"Low confidence ({confidence:.2f}) for category '{category}'. Flagging for review.")
+        state["classification_category"] = f"Review_Needed: {category}"
+        state["processing_steps"] = current_steps + ["quality_check_node: FLAGGED FOR REVIEW - Low Confidence"]
+    else:
+        state["processing_steps"] = current_steps + ["quality_check_node: PASSED"]
+    return state
+
+def decide_next_step(state: ExcelRowClassificationState) -> str:
+    """
+    Determines the next node to execute based on the current state.
+    """
+    print("---DECIDING NEXT STEP---")
+    if state.get("error_message"):
+        print("Error detected. Routing to error handler.")
+        return "handle_error"
+
+    if state.get("classification_category", "").startswith("Review_Needed"):
+        print("Classification needs review. Ending here (could route to a review queue).")
+        return END # Or a specific node like "send_to_review_queue"
+    
+    print("Processing seems fine. Moving to END.")
+    return END
+
+def error_handling_node(state: ExcelRowClassificationState) -> ExcelRowClassificationState:
+    """
+    A simple node to log or handle errors before ending the graph.
+    """
+    print("---ERROR HANDLER---")
+    current_steps = state.get("processing_steps", [])
+    error = state.get("error_message", "Unknown error")
+    print(f"An error occurred during processing: {error}")
+    state["processing_steps"] = current_steps + [f"error_handling_node: Logged - {error}"]
+    # Potentially clear category if error is critical for this item
+    state["classification_category"] = "Error"
+    state["confidence_score"] = 0.0
+    return state
+
+# --- 3. Construct the Graph ---
+workflow = StateGraph(ExcelRowClassificationState)
+
+workflow.add_node("strategy_determiner", determine_classification_strategy)
+workflow.add_node("row_validator", validate_row_data)
+workflow.add_node("prompt_preparer", prepare_llm_input_node)
+workflow.add_node("llm_classifier", llm_classification_agent)
+workflow.add_node("quality_checker", quality_check_node)
+workflow.add_node("error_handler", error_handling_node)
+
+workflow.set_entry_point("strategy_determiner")
+workflow.add_edge("strategy_determiner", "row_validator")
+workflow.add_edge("row_validator", "prompt_preparer")
+workflow.add_edge("prompt_preparer", "llm_classifier")
+workflow.add_edge("llm_classifier", "quality_checker")
+
+workflow.add_conditional_edges(
+    "quality_checker",
+    decide_next_step,
+    {
+        "handle_error": "error_handler",
+        END: END
+    }
+)
+# Also, if strategy determination or row validation fails, it should go to error handler
+# We can achieve this by checking error_message in decide_next_step, or by adding more conditional edges.
+# For simplicity, `decide_next_step` already handles `error_message`.
+# An alternative for earlier exits:
+# workflow.add_conditional_edges("strategy_determiner", lambda s: "error_handler" if s.get("error_message") else "row_validator", {"error_handler": "error_handler", "row_validator": "row_validator"})
+# workflow.add_conditional_edges("row_validator", lambda s: "error_handler" if s.get("error_message") else "prompt_preparer", {"error_handler": "error_handler", "prompt_preparer": "prompt_preparer"})
+# workflow.add_conditional_edges("prompt_preparer", lambda s: "error_handler" if s.get("error_message") else "llm_classifier", {"error_handler": "error_handler", "llm_classifier": "llm_classifier"})
+
+
+workflow.add_edge("error_handler", END)
+
+app = workflow.compile()
+
+# --- 4. Example Usage ---
+
+# Common settings for a batch
+TARGET_TEXT_COLUMN = "description"
+LABEL_COLUMN = "category_label" # Used if examples are provided
+
+# SCENARIO 1: Unsupervised / Anomaly Detection (no examples, no definitions)
+print("\n\n--- SCENARIO 1: Unsupervised / Anomaly Detection ---")
+sample_rows_unsupervised = [
+    {"id": 101, TARGET_TEXT_COLUMN: "The system experienced a critical failure event last night."},
+    {"id": 102, TARGET_TEXT_COLUMN: "User login activity seems normal."},
+    {"id": 103, TARGET_TEXT_COLUMN: "Zzkx_jfa!## ** strange data entry."},
+    {"id": 104, TARGET_TEXT_COLUMN: ""}, # Empty text
+    {"id": 105, "some_other_col": "Missing description field"}, # Missing target column
+]
+
+for i, row in enumerate(sample_rows_unsupervised):
+    print(f"\n--- Processing Unsupervised Row {i+1} ---")
+    initial_state_unsupervised: ExcelRowClassificationState = {
+        "input_row": row,
+        "target_column_for_classification": TARGET_TEXT_COLUMN,
+        # No examples or definitions for this scenario
+        "provided_examples": None,
+        "class_definitions": None,
+        "label_column_name": LABEL_COLUMN, # Still provide, though not used by this mode
+        "all_rows_data": None, # Not used in this simplified version
+        "classification_mode": None,
+        "llm_prompt": None,
+        "classification_category": None,
+        "confidence_score": None,
+        "llm_reasoning": None,
+        "error_message": None,
+        "processing_steps": []
+    }
+    final_state = app.invoke(initial_state_unsupervised)
+    print(f"--- Final State for Unsupervised Row {i+1} ---")
+    print(f"  Input: {final_state.get('input_row')}")
+    print(f"  Mode: {final_state.get('classification_mode')}")
+    print(f"  Error: {final_state.get('error_message')}" if final_state.get('error_message') else "  Error: None")
+    print(f"  Classification: {final_state.get('classification_category')}")
+    print(f"  Confidence: {final_state.get('confidence_score'):.2f}" if final_state.get('confidence_score') is not None else "  Confidence: N/A")
+    print(f"  LLM Reasoning: {final_state.get('llm_reasoning')}")
+    print(f"  Processing Steps: {final_state.get('processing_steps')}")
+
+
+# SCENARIO 2: Few-Shot Classification (with examples)
+print("\n\n--- SCENARIO 2: Few-Shot Classification ---")
+few_shot_examples = [
+    {TARGET_TEXT_COLUMN: "This is an urgent request, please respond ASAP.", LABEL_COLUMN: "Urgent"},
+    {TARGET_TEXT_COLUMN: "I have a question about my account.", LABEL_COLUMN: "Inquiry"},
+    {TARGET_TEXT_COLUMN: "The product is excellent, thank you!", LABEL_COLUMN: "Positive Feedback"},
+]
+sample_rows_few_shot = [
+    {"id": 201, TARGET_TEXT_COLUMN: "Need help with this task urgently."},
+    {"id": 202, TARGET_TEXT_COLUMN: "What are your business hours?"},
+    {"id": 203, TARGET_TEXT_COLUMN: "This is not good, I am unhappy with the service."}, # Should be classified based on general LLM knowledge or as 'General' by simple simulator
+]
+
+for i, row in enumerate(sample_rows_few_shot):
+    print(f"\n--- Processing Few-Shot Row {i+1} ---")
+    initial_state_few_shot: ExcelRowClassificationState = {
+        "input_row": row,
+        "target_column_for_classification": TARGET_TEXT_COLUMN,
+        "provided_examples": few_shot_examples,
+        "label_column_name": LABEL_COLUMN,
+        "class_definitions": None, # No definitions for this scenario
+        "all_rows_data": None,
+        "classification_mode": None,
+        "llm_prompt": None,
+        "classification_category": None,
+        "confidence_score": None,
+        "llm_reasoning": None,
+        "error_message": None,
+        "processing_steps": []
+    }
+    final_state = app.invoke(initial_state_few_shot)
+    print(f"--- Final State for Few-Shot Row {i+1} ---")
+    print(f"  Input: {final_state.get('input_row')}")
+    print(f"  Mode: {final_state.get('classification_mode')}")
+    print(f"  Error: {final_state.get('error_message')}" if final_state.get('error_message') else "  Error: None")
+    print(f"  Classification: {final_state.get('classification_category')}")
+    print(f"  Confidence: {final_state.get('confidence_score'):.2f}" if final_state.get('confidence_score') is not None else "  Confidence: N/A")
+    print(f"  LLM Reasoning: {final_state.get('llm_reasoning')}")
+    print(f"  Processing Steps: {final_state.get('processing_steps')}")
+
+
+# SCENARIO 3: Definition-Based Classification
+print("\n\n--- SCENARIO 3: Definition-Based Classification ---")
+class_definitions_risk = {
+    "High Risk": "Events or texts indicating significant potential for financial loss, security breaches, or critical system failures.",
+    "Medium Risk": "Events or texts suggesting moderate operational issues, customer dissatisfaction, or minor security concerns.",
+    "Low Risk": "Informational texts, routine operational messages, or positive feedback with no immediate risk implications."
+}
+sample_rows_definition = [
+    {"id": 301, TARGET_TEXT_COLUMN: "We detected a major security breach involving customer data, potential financial loss is high."},
+    {"id": 302, TARGET_TEXT_COLUMN: "A customer reported a minor bug in the UI, does not affect core functionality."},
+    {"id": 303, TARGET_TEXT_COLUMN: "Scheduled maintenance completed successfully."},
+]
+
+for i, row in enumerate(sample_rows_definition):
+    print(f"\n--- Processing Definition-Based Row {i+1} ---")
+    initial_state_definition: ExcelRowClassificationState = {
+        "input_row": row,
+        "target_column_for_classification": TARGET_TEXT_COLUMN,
+        "provided_examples": None, # No examples for this scenario
+        "label_column_name": None,
+        "class_definitions": class_definitions_risk,
+        "all_rows_data": None,
+        "classification_mode": None,
+        "llm_prompt": None,
+        "classification_category": None,
+        "confidence_score": None,
+        "llm_reasoning": None,
+        "error_message": None,
+        "processing_steps": []
+    }
+    final_state = app.invoke(initial_state_definition)
+    print(f"--- Final State for Definition-Based Row {i+1} ---")
+    print(f"  Input: {final_state.get('input_row')}")
+    print(f"  Mode: {final_state.get('classification_mode')}")
+    print(f"  Error: {final_state.get('error_message')}" if final_state.get('error_message') else "  Error: None")
+    print(f"  Classification: {final_state.get('classification_category')}")
+    print(f"  Confidence: {final_state.get('confidence_score'):.2f}" if final_state.get('confidence_score') is not None else "  Confidence: N/A")
+    print(f"  LLM Reasoning: {final_state.get('llm_reasoning')}")
+    print(f"  Processing Steps: {final_state.get('processing_steps')}")
+
+
+# To visualize the graph (requires graphviz installed: `pip install graphviz` and the `dot` command line tool)
+# try:
+#     from IPython.display import Image, display
+#     graph_image = app.get_graph().draw_mermaid_png()
+#     if graph_image:
+#         display(Image(graph_image))
+#         print("\nGraph visualization (Mermaid PNG) was attempted.")
+#     else:
+#         print("\nFailed to generate graph visualization.")
+# except Exception as e:
+#     print(f"\nCould not visualize graph (is graphviz installed and in PATH?): {e}")
+#     print("Mermaid graph definition:\n", app.get_graph().draw_mermaid())
+
+print("\n--- WORKFLOW EXECUTION COMPLETE ---")

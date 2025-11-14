@@ -1,0 +1,324 @@
+AppConfig.swift
+import Foundation
+
+// ----------------------------------------------------------------------
+// 1.  EDIT THIS FILE
+// ----------------------------------------------------------------------
+// Paste the Client ID and Tenant ID from your Azure AD App Registration.
+
+enum AppConfig {
+    
+    // 1. Paste your Application (client) ID here
+    static let kClientID = "YOUR_CLIENT_ID_HERE"
+    
+    // 2. Paste your Directory (tenant) ID here
+    static let kTenantID = "YOUR_TENANT_ID_HERE"
+    
+    // 3. Set the authority URL
+    static let kAuthority = "https://login.microsoftonline.com/\(kTenantID)"
+    
+    // 4. Define the API permissions (scopes) you want to request.
+    // "User.Read" is a good default for testing.
+    static let kScopes: [String] = ["User.Read"]
+}
+
+AuthService.swift
+import Foundation
+import MSAL
+
+/// A singleton service to manage all MSAL authentication logic.
+final class AuthService {
+    
+    // MARK: - Properties
+    
+    static let shared = AuthService()
+    
+    private(set) var msalPublicClient: MSALPublicClientApplication?
+    private(set) var currentAccount: MSALAccount?
+
+    // MARK: - Initializer
+    
+    private init() {
+        do {
+            // 1. Setup the MSAL Public Client Application
+            let authority = try MSALAADAuthority(url: URL(string: AppConfig.kAuthority)!)
+            let config = MSALPublicClientApplicationConfig(clientId: AppConfig.kClientID,
+                                                           redirectUri: nil, // Use default
+                                                           authority: authority)
+            self.msalPublicClient = try MSALPublicClientApplication(configuration: config)
+            
+        } catch {
+            print("AuthService: Unable to setup MSAL: \(error.localizedDescription)")
+        }
+    }
+    
+    // MARK: - Public Methods
+
+    /// Attempts to sign in the user.
+    /// Will try to sign in silently first, then fall back to interactive login.
+    /// - Parameters:
+    ///   - viewController: The view controller to present the interactive login UI from.
+    ///   - completion: A block executed with the access token or an error.
+    public func signIn(from viewController: UIViewController, completion: @escaping (String?, Error?) -> Void) {
+        guard let msalClient = msalPublicClient else {
+            completion(nil, NSError(domain: "AuthService", code: -1, userInfo: [NSLocalizedDescriptionKey: "MSAL client not initialized."]))
+            return
+        }
+
+        // 1. Try to get a user account silently
+        Task {
+            do {
+                let accounts = try await msalClient.allAccounts()
+                
+                if let account = accounts.first {
+                    // 2. Account found, try to get a token silently
+                    self.currentAccount = account
+                    let result = try await acquireTokenSilently(for: account, from: msalClient)
+                    completion(result.accessToken, nil)
+                } else {
+                    // 3. No account found, start interactive login
+                    let result = try await acquireTokenInteractively(from: viewController, client: msalClient)
+                    self.currentAccount = result.account
+                    completion(result.accessToken, nil)
+                }
+            } catch {
+                // 4. Handle errors (e.g., user cancelled, consent required)
+                print("AuthService: Sign-in failed: \(error.localizedDescription)")
+                completion(nil, error)
+            }
+        }
+    }
+
+    /// Signs out the current user.
+    public func signOut(completion: @escaping (Error?) -> Void) {
+        guard let msaClient = msalPublicClient, let account = currentAccount else {
+            completion(nil)
+            return
+        }
+        
+        Task {
+            do {
+                try await msaClient.remove(account)
+                self.currentAccount = nil
+                completion(nil)
+            } catch {
+                completion(error)
+            }
+        }
+    }
+    
+    // MARK: - Private Helpers
+
+    private func acquireTokenSilently(for account: MSALAccount, from client: MSALPublicClientApplication) async throws -> MSALResult {
+        let parameters = MSALSilentTokenParameters(scopes: AppConfig.kScopes, account: account)
+        return try await client.acquireTokenSilent(with: parameters)
+    }
+    
+    private func acquireTokenInteractively(from controller: UIViewController, client: MSALPublicClientApplication) async throws -> MSALResult {
+        let webviewParams = MSALWebviewParameters(authPresentationViewController: controller)
+        let parameters = MSALInteractiveTokenParameters(scopes: AppConfig.kScopes, webviewParameters: webviewParams)
+        return try await client.acquireToken(with: parameters)
+    }
+}
+
+ViewController.swift
+import UIKit
+import WebKit
+
+class ViewController: UIViewController {
+
+    // 1. Create the WKWebView
+    private let webView: WKWebView = {
+        // We must enable JavaScript for token injection
+        let prefs = WKWebpagePreferences()
+        prefs.allowsContentJavaScript = true
+        
+        let config = WKWebViewConfiguration()
+        config.defaultWebpagePreferences = prefs
+        
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        webView.isHidden = true // Start as hidden, show after login
+        return webView
+    }()
+    
+    private let loadingLabel: UILabel = {
+        let label = UILabel()
+        label.text = "Authenticating..."
+        label.textAlignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        setupUI()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        
+        // 2. Start the authentication flow when the view appears
+        // This will be skipped if a token is already cached (SSO)
+        signInAndLoadWebview()
+    }
+
+    private func setupUI() {
+        view.backgroundColor = .systemBackground
+        view.addSubview(loadingLabel)
+        view.addSubview(webView)
+        
+        NSLayoutConstraint.activate([
+            loadingLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            loadingLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            
+            webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            webView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+            webView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor)
+        ])
+    }
+    
+    private func signInAndLoadWebview() {
+        // 3. Call the AuthService to handle the sign-in logic
+        AuthService.shared.signIn(from: self) { [weak self] (token, error) in
+            guard let self = self else { return }
+            
+            if let error = error {
+                // Handle the error (e.g., user cancelled)
+                self.loadingLabel.text = "Error: \(error.localizedDescription)"
+                return
+            }
+            
+            guard let token = token else {
+                self.loadingLabel.text = "Error: Did not receive token."
+                return
+            }
+            
+            // 4. Auth success! Load the webview with the token.
+            print("Successfully acquired token.")
+            self.loadLocalWebview(with: token)
+        }
+    }
+    
+    private func loadLocalWebview(with token: String) {
+        // 5. Find the local index.html file in the "dist" folder
+        guard let url = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "dist") else {
+            self.loadingLabel.text = "Error: index.html not found."
+            return
+        }
+        
+        // 6. Load the local file
+        self.webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        
+        // 7. Inject the token into the webview's JavaScript context
+        // We will create a global variable `window.injectedAccessToken`
+        let js = "window.injectedAccessToken = '\(token)';"
+        
+        // We use a WKUserScript to ensure the script runs *before*
+        // the page's own scripts try to access the token.
+        let script = WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        self.webView.configuration.userContentController.addUserScript(script)
+        
+        // 8. Show the webview
+        self.loadingLabel.isHidden = true
+        self.webView.isHidden = false
+    }
+}
+
+index.html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local PWA</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 90vh;
+            text-align: center;
+            flex-direction: column;
+            background-color: #f0f0f0;
+            color: #333;
+            margin: 20px;
+        }
+        h1 {
+            color: #0078d4;
+        }
+        .token-box {
+            word-break: break-all;
+            background-color: #fff;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 20px;
+            max-width: 100%;
+            font-family: monospace;
+            font-size: 12px;
+            text-align: left;
+        }
+        .status-fail {
+            color: #d9534f;
+        }
+        .status-success {
+            color: #5cb85c;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Hello from your Local PWA!</h1>
+    
+    <div id="status-message">Loading...</div>
+    
+    <div class="token-box">
+        <strong>Injected Access Token:</strong>
+        <pre id="token-display">Waiting for token...</pre>
+    </div>
+
+    <script>
+        // This script runs inside the webview *after* the native code
+        // has injected the token.
+
+        function checkToken() {
+            const statusEl = document.getElementById('status-message');
+            const tokenEl = document.getElementById('token-display');
+            
+            // Check for the global variable set by the native Swift code
+            if (window.injectedAccessToken) {
+                statusEl.textContent = "Token Injected Successfully!";
+                statusEl.className = "status-success";
+                
+                // For security, we only show the first 20 chars
+                const truncatedToken = window.injectedAccessToken.substring(0, 20) + "...";
+                tokenEl.textContent = truncatedToken;
+
+                //
+                // *** THIS IS WHERE YOUR APP LOGIC GOES ***
+                //
+                // From here, you can use `window.injectedAccessToken`
+                // in your app's main JavaScript to make API calls:
+                //
+                // fetch('https://api.yourcompany.com/v1/data', {
+                //     headers: {
+                //         'Authorization': 'Bearer ' + window.injectedAccessToken
+                //     }
+                // });
+                //
+            } else {
+                statusEl.textContent = "Token not found. Was it injected?";
+                statusEl.className = "status-fail";
+                tokenEl.textContent = "null";
+            }
+        }
+
+        // Wait for the DOM to be ready before checking for the token
+        document.addEventListener('DOMContentLoaded', checkToken);
+    </sCRIPT>
+
+</body>
+</html>
